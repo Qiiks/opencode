@@ -65,6 +65,7 @@ import { setCursorPosition } from "@/components/prompt-input/editor-dom"
 import { promptLength } from "@/components/prompt-input/history"
 import { type FollowupDraft, sendFollowupDraft } from "@/components/prompt-input/submit"
 import {
+<<<<<<< HEAD
   createPromptInputController,
   createSessionComposerController,
   createSessionComposerRegionController,
@@ -73,6 +74,18 @@ import {
 import { createOpenReviewFile, createSessionTabs, createSizing, shouldShowFileTree } from "@/pages/session/helpers"
 import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
 import { createTimelineModel } from "@/pages/session/timeline/model"
+=======
+  createOpenReviewFile,
+  createVcsRefreshManager,
+  createSessionTabs,
+  createSizing,
+  focusTerminalById,
+  isGitHeadPath,
+  isGitMetadataPath,
+  shouldFocusTerminalOnKeyDown,
+} from "@/pages/session/helpers"
+import { MessageTimeline } from "@/pages/session/message-timeline"
+>>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
 import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/pages/session/review-tab"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { restorePromptModel, syncPromptModel, syncSessionModel } from "@/pages/session/session-model-helpers"
@@ -699,7 +712,18 @@ export default function Page() {
         : skipToken,
     }
   })
+<<<<<<< HEAD
   const refreshVcs = debounce(() => void queryClient.invalidateQueries({ queryKey: vcsKey() }), 100)
+=======
+  const watcherRefreshVcs = createVcsRefreshManager({
+    key: vcsQueryPrefix,
+    refresh: (queryKey) => queryClient.invalidateQueries({ queryKey }),
+    cleanup: (queryKey) => queryClient.removeQueries({ queryKey }),
+    wait: 100,
+  })
+  createEffect(on(vcsQueryPrefix, watcherRefreshVcs.sync, { defer: true }))
+  const scheduleVcsRefresh = () => watcherRefreshVcs.schedule()
+>>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
   const reviewDiffs = () => {
     if (reviewMode() === "git" || reviewMode() === "branch")
       // avoids suspense
@@ -949,16 +973,31 @@ export default function Page() {
     ),
   )
 
+<<<<<<< HEAD
   const stopVcs = sdk().event.listen((evt) => {
     const details = evt.details as { type: string; properties?: unknown }
     if (details.type !== "file.watcher.updated" && details.type !== "filesystem.changed") return
+=======
+  const stopVcs = sdk.event.listen((evt) => {
+    if (evt.details.type === "vcs.branch.updated") {
+      scheduleVcsRefresh()
+      return
+    }
+    if (evt.details.type !== "file.watcher.updated") return
+>>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
     const props =
       typeof details.properties === "object" && details.properties
         ? (details.properties as Record<string, unknown>)
         : undefined
     const file = typeof props?.file === "string" ? props.file : undefined
+<<<<<<< HEAD
     if (!file || file.startsWith(".git/")) return
     refreshVcs()
+=======
+    if (!file) return
+    if (isGitMetadataPath(file) && !isGitHeadPath(file)) return
+    scheduleVcsRefresh()
+>>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
   })
   onCleanup(stopVcs)
 
@@ -1099,7 +1138,7 @@ export default function Page() {
       () => sync().data.session_status[params.id ?? ""]?.type,
       (next, prev) => {
         if (next !== "idle" || prev === undefined || prev === "idle") return
-        refreshVcs()
+        scheduleVcsRefresh()
       },
       { defer: true },
     ),

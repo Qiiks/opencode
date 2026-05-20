@@ -1,9 +1,12 @@
-import { describe, expect, test } from "bun:test"
-import { createMemo, createRoot } from "solid-js"
+import { describe, expect, test, vi } from "bun:test"
+import { QueryClient } from "@tanstack/solid-query"
+import { createMemo, createRoot, createSignal } from "solid-js"
 import { createStore } from "solid-js/store"
 import {
   SESSION_OPEN_FILE_TAB,
   createOpenReviewFile,
+  createVcsRefreshManager,
+  createVcsRefreshScheduler,
   createOpenSessionFileTab,
   createSessionTabs,
   focusTerminalById,
@@ -102,6 +105,373 @@ describe("getTabReorderIndex", () => {
 
   test("returns undefined for unknown droppable id", () => {
     expect(getTabReorderIndex(["a", "b", "c"], "a", "missing")).toBeUndefined()
+  })
+})
+
+describe("createVcsRefreshScheduler", () => {
+  test("batches scheduled calls without extending the first refresh window", async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const scheduler = createVcsRefreshScheduler(() => calls++, 100)
+
+      scheduler.schedule()
+      vi.advanceTimersByTime(50)
+      scheduler.schedule()
+      scheduler.schedule()
+      vi.advanceTimersByTime(99)
+      await Promise.resolve()
+      expect(calls).toBe(1)
+
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      expect(calls).toBe(1)
+      scheduler.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("runs one trailing refresh when changes arrive while refresh is in flight", async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      let resolveRefresh: (() => void) | undefined
+      const scheduler = createVcsRefreshScheduler(() => {
+        calls++
+        return new Promise<void>((resolve) => {
+          resolveRefresh = resolve
+        })
+      }, 100)
+
+      scheduler.schedule()
+      vi.advanceTimersByTime(100)
+      expect(calls).toBe(1)
+
+      scheduler.schedule()
+      scheduler.schedule()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      expect(calls).toBe(1)
+
+      resolveRefresh?.()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(calls).toBe(1)
+
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      expect(calls).toBe(2)
+      scheduler.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("recovers when the refresh throws synchronously", async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const scheduler = createVcsRefreshScheduler(() => {
+        calls++
+        if (calls === 1) throw new Error("refresh failed")
+      }, 100)
+
+      scheduler.schedule()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      scheduler.schedule()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      expect(calls).toBe(2)
+      scheduler.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("does not run a trailing refresh after dispose during an active refresh", async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      let resolveRefresh: (() => void) | undefined
+      const scheduler = createVcsRefreshScheduler(() => {
+        calls++
+        return new Promise<void>((resolve) => {
+          resolveRefresh = resolve
+        })
+      }, 100)
+
+      scheduler.schedule()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      expect(calls).toBe(1)
+
+      scheduler.schedule()
+      scheduler.dispose()
+      resolveRefresh?.()
+      await Promise.resolve()
+      await Promise.resolve()
+      vi.advanceTimersByTime(100)
+
+      expect(calls).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("cancels pending calls on dispose", () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const scheduler = createVcsRefreshScheduler(() => calls++, 100)
+
+      scheduler.schedule()
+      scheduler.dispose()
+      vi.advanceTimersByTime(100)
+
+      expect(calls).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("drops queued refreshes from a disposed directory scheduler", async () => {
+    vi.useFakeTimers()
+    try {
+      const calls: string[] = []
+      const first = createVcsRefreshScheduler(() => calls.push("first"), 100)
+
+      first.schedule()
+      first.dispose()
+      const second = createVcsRefreshScheduler(() => calls.push("second"), 100)
+      second.schedule()
+
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+      expect(calls).toEqual(["second"])
+      second.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe("createVcsRefreshManager", () => {
+  test("cleans superseded pending refreshes when the key changes", async () => {
+    vi.useFakeTimers()
+    try {
+      const calls: string[] = []
+      const cleanup: string[] = []
+      let setKey: (key: string) => void = () => undefined
+      let manager: { schedule(): void; sync(): void } | undefined
+      const dispose = createRoot((dispose) => {
+        const [key, set] = createSignal("first")
+        setKey = (value) => set(value)
+        manager = createVcsRefreshManager({
+          key,
+          refresh: (value) => calls.push(value),
+          cleanup: (value) => cleanup.push(value),
+          wait: 100,
+        })
+        return dispose
+      })
+
+      manager?.schedule()
+      setKey("second")
+      await Promise.resolve()
+      manager?.schedule()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+
+      expect(calls).toEqual(["second"])
+      expect(cleanup).toEqual(["first"])
+      dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("disposes every scheduler created across key changes", async () => {
+    vi.useFakeTimers()
+    try {
+      const calls: string[] = []
+      const cleanup: string[] = []
+      let setKey: (key: string) => void = () => undefined
+      let manager: { schedule(): void; sync(): void } | undefined
+      const dispose = createRoot((dispose) => {
+        const [key, set] = createSignal("first")
+        setKey = (value) => set(value)
+        manager = createVcsRefreshManager({
+          key,
+          refresh: (value) => calls.push(value),
+          cleanup: (value) => cleanup.push(value),
+          wait: 100,
+        })
+        return dispose
+      })
+
+      manager?.schedule()
+      setKey("second")
+      await Promise.resolve()
+      manager?.schedule()
+      dispose()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+
+      expect(calls).toEqual([])
+      expect(cleanup).toEqual(["first", "second"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("clears pending VCS query cache entries on cleanup before refresh", async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new QueryClient({ defaultOptions: { queries: { refetchOnMount: false } } })
+      const first = ["session-vcs", "first"] as const
+      const second = ["session-vcs", "second"] as const
+      client.setQueryData([...first, "main", "main", "git"], ["old-first"])
+      client.setQueryData([...second, "main", "main", "git"], ["old-second"])
+      let setKey: (key: readonly string[]) => void = () => undefined
+      let manager: { schedule(): void; sync(): void } | undefined
+      const dispose = createRoot((dispose) => {
+        const [key, set] = createSignal<readonly string[]>(first)
+        setKey = (value) => set(() => value)
+        manager = createVcsRefreshManager({
+          key,
+          refresh: (queryKey) => client.invalidateQueries({ queryKey }),
+          cleanup: (queryKey) => client.removeQueries({ queryKey }),
+          wait: 100,
+        })
+        return dispose
+      })
+
+      manager?.schedule()
+      setKey(second)
+      manager?.schedule()
+      dispose()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+
+      expect(client.getQueryData([...first, "main", "main", "git"])).toBeUndefined()
+      expect(client.getQueryData([...second, "main", "main", "git"])).toBeUndefined()
+      client.clear()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("removes stale VCS cache for superseded pending keys", async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new QueryClient({ defaultOptions: { queries: { refetchOnMount: false } } })
+      const first = ["session-vcs", "first"] as const
+      const second = ["session-vcs", "second"] as const
+      client.setQueryData([...first, "main", "main", "git"], ["old-first"])
+      client.setQueryData([...second, "main", "main", "git"], ["old-second"])
+      let setKey: (key: readonly string[]) => void = () => undefined
+      let manager: { schedule(): void; sync(): void } | undefined
+      const dispose = createRoot((dispose) => {
+        const [key, set] = createSignal<readonly string[]>(first)
+        setKey = (value) => set(() => value)
+        manager = createVcsRefreshManager({
+          key,
+          refresh: (queryKey) => client.invalidateQueries({ queryKey }),
+          cleanup: (queryKey) => client.removeQueries({ queryKey }),
+          wait: 100,
+        })
+        return dispose
+      })
+
+      manager?.schedule()
+      setKey(second)
+      manager?.schedule()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+
+      expect(client.getQueryData([...first, "main", "main", "git"])).toBeUndefined()
+      expect(client.getQueryData<string[]>([...second, "main", "main", "git"])).toEqual(["old-second"])
+      dispose()
+      client.clear()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("cleans a superseded pending key even without another schedule call", async () => {
+    vi.useFakeTimers()
+    try {
+      const calls: string[] = []
+      const cleanup: string[] = []
+      let setKey: (key: string) => void = () => undefined
+      let manager: { schedule(): void; sync(): void } | undefined
+      const dispose = createRoot((dispose) => {
+        const [key, set] = createSignal("first")
+        setKey = (value) => set(value)
+        manager = createVcsRefreshManager({
+          key,
+          refresh: (value) => calls.push(value),
+          cleanup: (value) => cleanup.push(value),
+          wait: 100,
+        })
+        return dispose
+      })
+
+      manager?.schedule()
+      setKey("second")
+      manager?.sync()
+      await Promise.resolve()
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+
+      expect(calls).toEqual([])
+      expect(cleanup).toEqual(["first"])
+      dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe("isGitMetadataPath", () => {
+  test("matches relative, absolute, and windows git metadata paths", () => {
+    expect(isGitMetadataPath(".git")).toBe(true)
+    expect(isGitMetadataPath(".git/HEAD")).toBe(true)
+    expect(isGitMetadataPath("/repo/.git")).toBe(true)
+    expect(isGitMetadataPath("/repo/.git/worktrees/feature/HEAD")).toBe(true)
+    expect(isGitMetadataPath("C:\\repo\\.git")).toBe(true)
+    expect(isGitMetadataPath("C:\\repo\\.git\\worktrees\\feature\\HEAD")).toBe(true)
+  })
+
+  test("does not match regular file paths containing git in the name", () => {
+    expect(isGitMetadataPath("src/git/index.ts")).toBe(false)
+    expect(isGitMetadataPath("src/.github/workflows/test.yml")).toBe(false)
+  })
+})
+
+describe("isGitHeadPath", () => {
+  test("matches main and worktree git HEAD signal paths", () => {
+    expect(isGitHeadPath(".git/HEAD")).toBe(true)
+    expect(isGitHeadPath(".git/logs/HEAD")).toBe(true)
+    expect(isGitHeadPath("/repo/.git/HEAD")).toBe(true)
+    expect(isGitHeadPath("/repo/.git/logs/HEAD")).toBe(true)
+    expect(isGitHeadPath("/repo/.git/worktrees/feature/HEAD")).toBe(true)
+    expect(isGitHeadPath("/repo/.git/worktrees/feature/logs/HEAD")).toBe(true)
+    expect(isGitHeadPath("C:\\repo\\.git\\HEAD")).toBe(true)
+    expect(isGitHeadPath("C:\\repo\\.git\\logs\\HEAD")).toBe(true)
+    expect(isGitHeadPath("C:\\repo\\.git\\worktrees\\feature\\HEAD")).toBe(true)
+    expect(isGitHeadPath("C:\\repo\\.git\\worktrees\\feature\\logs\\HEAD")).toBe(true)
+  })
+
+  test("does not match non-HEAD git metadata paths or regular HEAD files", () => {
+    expect(isGitHeadPath(".git/index")).toBe(false)
+    expect(isGitHeadPath("/repo/.git/refs/heads/dev")).toBe(false)
+    expect(isGitHeadPath("src/HEAD")).toBe(false)
   })
 })
 

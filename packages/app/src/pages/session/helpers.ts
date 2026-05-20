@@ -166,6 +166,117 @@ export const getTabReorderIndex = (tabs: readonly string[], from: string, to: st
   return toIndex
 }
 
+export const createVcsRefreshScheduler = (fn: () => Promise<unknown> | unknown, wait: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let running = false
+  let dirty = false
+  let disposed = false
+
+  const run = () => {
+    timer = undefined
+    if (disposed) return
+    if (running) {
+      dirty = true
+      return
+    }
+    running = true
+    Promise.resolve()
+      .then(fn)
+      .catch(() => {})
+      .finally(() => {
+        running = false
+        if (disposed) {
+          dirty = false
+          return
+        }
+        if (!dirty) return
+        dirty = false
+        schedule()
+      })
+  }
+
+  const schedule = () => {
+    if (disposed) return
+    if (running) {
+      dirty = true
+      return
+    }
+    if (timer !== undefined) return
+    timer = setTimeout(run, wait)
+  }
+
+  return {
+    schedule,
+    dispose() {
+      disposed = true
+      dirty = false
+      if (timer === undefined) return
+      clearTimeout(timer)
+      timer = undefined
+    },
+  }
+}
+
+export const createVcsRefreshManager = <T,>(input: {
+  key: Accessor<T>
+  refresh: (key: T) => Promise<unknown> | unknown
+  cleanup?: (key: T) => void
+  wait: number
+}) => {
+  const schedulers = new Set<ReturnType<typeof createVcsRefreshScheduler>>()
+  const pending = new Set<T>()
+  const create = (key: T) => {
+    const scheduler = createVcsRefreshScheduler(() => {
+      pending.delete(key)
+      return input.refresh(key)
+    }, input.wait)
+    schedulers.add(scheduler)
+    return scheduler
+  }
+  let currentKey = input.key()
+  let current = create(currentKey)
+  const sync = () => {
+    const key = input.key()
+    if (Object.is(key, currentKey)) return
+    if (pending.delete(currentKey)) input.cleanup?.(currentKey)
+    current.dispose()
+    schedulers.delete(current)
+    currentKey = key
+    current = create(key)
+  }
+  onCleanup(() => {
+    for (const scheduler of schedulers) scheduler.dispose()
+    schedulers.clear()
+    for (const key of pending) input.cleanup?.(key)
+    pending.clear()
+  })
+
+  return {
+    sync,
+    schedule() {
+      sync()
+      pending.add(currentKey)
+      current.schedule()
+    },
+  }
+}
+
+export const isGitMetadataPath = (file: string) => {
+  const normalized = file.replaceAll("\\", "/")
+  return normalized === ".git" || normalized.endsWith("/.git") || normalized.startsWith(".git/") || normalized.includes("/.git/")
+}
+
+export const isGitHeadPath = (file: string) => {
+  const normalized = file.replaceAll("\\", "/")
+  return (
+    normalized === ".git/HEAD" ||
+    normalized === ".git/logs/HEAD" ||
+    normalized.endsWith("/.git/HEAD") ||
+    normalized.endsWith("/.git/logs/HEAD") ||
+    /(^|\/)\.git\/worktrees\/[^/]+\/(logs\/)?HEAD$/.test(normalized)
+  )
+}
+
 export const createSizing = () => {
   const [state, setState] = createStore({ active: false })
   let t: number | undefined
