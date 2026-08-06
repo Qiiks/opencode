@@ -11,6 +11,8 @@ import {
   createSessionTabs,
   focusTerminalById,
   getTabReorderIndex,
+  isGitHeadPath,
+  isGitMetadataPath,
   shouldShowFileTree,
 } from "./helpers"
 
