@@ -22,7 +22,6 @@ import {
 import { makeEventListener } from "@solid-primitives/event-listener"
 import { createMediaQuery } from "@solid-primitives/media"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
-import { debounce } from "@solid-primitives/scheduled"
 import { useLocal } from "@/context/local"
 import { FileProvider, selectionFromLines, useFile, type FileSelection, type SelectedLineRange } from "@/context/file"
 import { createStore } from "solid-js/store"
@@ -65,27 +64,22 @@ import { setCursorPosition } from "@/components/prompt-input/editor-dom"
 import { promptLength } from "@/components/prompt-input/history"
 import { type FollowupDraft, sendFollowupDraft } from "@/components/prompt-input/submit"
 import {
-<<<<<<< HEAD
   createPromptInputController,
   createSessionComposerController,
   createSessionComposerRegionController,
   SessionComposerRegion,
 } from "@/pages/session/composer"
-import { createOpenReviewFile, createSessionTabs, createSizing, shouldShowFileTree } from "@/pages/session/helpers"
-import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
-import { createTimelineModel } from "@/pages/session/timeline/model"
-=======
+import {
   createOpenReviewFile,
-  createVcsRefreshManager,
   createSessionTabs,
   createSizing,
-  focusTerminalById,
+  createVcsRefreshManager,
   isGitHeadPath,
   isGitMetadataPath,
-  shouldFocusTerminalOnKeyDown,
+  shouldShowFileTree,
 } from "@/pages/session/helpers"
-import { MessageTimeline } from "@/pages/session/message-timeline"
->>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
+import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
+import { createTimelineModel } from "@/pages/session/timeline/model"
 import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/pages/session/review-tab"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { restorePromptModel, syncPromptModel, syncSessionModel } from "@/pages/session/session-model-helpers"
@@ -689,9 +683,10 @@ export default function Page() {
     const mode = reviewMode()
     if (mode === "git" || mode === "branch") return mode
   })
+  const vcsQueryPrefix = createMemo(() => ["session-vcs", sdk().directory] as const)
   const vcsKey = createMemo(
     () =>
-      ["session-vcs", sdk().directory, sync().data.vcs?.branch ?? "", sync().data.vcs?.default_branch ?? ""] as const,
+      [...vcsQueryPrefix(), sync().data.vcs?.branch ?? "", sync().data.vcs?.default_branch ?? ""] as const,
   )
   const vcsQuery = createQuery(() => {
     const mode = vcsMode()
@@ -712,9 +707,6 @@ export default function Page() {
         : skipToken,
     }
   })
-<<<<<<< HEAD
-  const refreshVcs = debounce(() => void queryClient.invalidateQueries({ queryKey: vcsKey() }), 100)
-=======
   const watcherRefreshVcs = createVcsRefreshManager({
     key: vcsQueryPrefix,
     refresh: (queryKey) => queryClient.invalidateQueries({ queryKey }),
@@ -723,7 +715,6 @@ export default function Page() {
   })
   createEffect(on(vcsQueryPrefix, watcherRefreshVcs.sync, { defer: true }))
   const scheduleVcsRefresh = () => watcherRefreshVcs.schedule()
->>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
   const reviewDiffs = () => {
     if (reviewMode() === "git" || reviewMode() === "branch")
       // avoids suspense
@@ -973,31 +964,21 @@ export default function Page() {
     ),
   )
 
-<<<<<<< HEAD
   const stopVcs = sdk().event.listen((evt) => {
     const details = evt.details as { type: string; properties?: unknown }
-    if (details.type !== "file.watcher.updated" && details.type !== "filesystem.changed") return
-=======
-  const stopVcs = sdk.event.listen((evt) => {
-    if (evt.details.type === "vcs.branch.updated") {
+    if (details.type === "vcs.branch.updated") {
       scheduleVcsRefresh()
       return
     }
-    if (evt.details.type !== "file.watcher.updated") return
->>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
+    if (details.type !== "file.watcher.updated") return
     const props =
       typeof details.properties === "object" && details.properties
         ? (details.properties as Record<string, unknown>)
         : undefined
     const file = typeof props?.file === "string" ? props.file : undefined
-<<<<<<< HEAD
-    if (!file || file.startsWith(".git/")) return
-    refreshVcs()
-=======
     if (!file) return
     if (isGitMetadataPath(file) && !isGitHeadPath(file)) return
     scheduleVcsRefresh()
->>>>>>> d1f460c93 (fix(app): harden vcs refresh coalescing)
   })
   onCleanup(stopVcs)
 

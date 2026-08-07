@@ -167,7 +167,7 @@ for (const item of targets) {
     external: ["node-gyp"],
     format: "esm",
     minify: true,
-    sourcemap: sourcemapsFlag ? "linked" : "none",
+    sourcemap: sourcemapsFlag ? "inline" : "none",
     splitting: true,
     compile: {
       autoloadBunfig: false,
