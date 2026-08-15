@@ -1120,7 +1120,12 @@ const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.time.created < lastAssistant.time.created
+            // Exit when the last assistant answered the last user. Compare by
+            // time with an id tiebreak (mirrors latest()): message ids wrap
+            // every ~2.18 years, and a same-millisecond user+assistant (instant/
+            // mock streams) must be ordered by id, not wall-clock equality.
+            (lastUser.time.created < lastAssistant.time.created ||
+              (lastUser.time.created === lastAssistant.time.created && lastUser.id < lastAssistant.id))
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
