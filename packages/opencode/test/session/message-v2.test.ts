@@ -1749,4 +1749,37 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks).toHaveLength(1)
     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
   })
+
+  // Regression: Identifier encodes (timestamp_ms << 12 | counter) in a 48-bit
+  // window that wraps every ~2.18 years. After the wrap (observed 2026-08-13→14)
+  // NEW ids start "msg_000…" and OLD ids start "msg_f…" — as strings "f" > "0",
+  // so max-by-id picks the WRONG (older) message across the wrap. latest() must
+  // order by creation time, with id only as a same-millisecond tiebreak.
+  test("latest() picks the chronologically-newest message across the ID wrap", () => {
+    const PRE_WRAP = 1_782_000_000_000
+    const POST_WRAP = 1_786_000_000_000
+    const oldUser = {
+      info: { ...userInfo(MessageID.make("msg_f26f00000000000000000001")), time: { created: PRE_WRAP } },
+      parts: [{ ...basePart("msg_f26f00000000000000000001", "p1"), type: "text", text: "old turn" }] as SessionV1.Part[],
+    }
+    const newUser = {
+      info: { ...userInfo(MessageID.make("msg_000000000000000000000001")), time: { created: POST_WRAP } },
+      parts: [{ ...basePart("msg_000000000000000000000001", "p1"), type: "text", text: "new turn" }] as SessionV1.Part[],
+    }
+    const oldAssistant = {
+      info: {
+        ...assistantInfo(MessageID.make("msg_f26f00000000000000000002"), MessageID.make("msg_f26f00000000000000000001")),
+        finish: "stop",
+        time: { created: PRE_WRAP + 1 },
+      } as SessionV1.Assistant,
+      parts: [],
+    }
+
+    // Pre-wrap messages AFTER post-wrap messages in the array: id-based "max"
+    // would still pick the pre-wrap assistant as latest, time-based picks the
+    // post-wrap user as the last user and the pre-wrap assistant as finished.
+    const state = MessageV2.latest([oldUser, oldAssistant, newUser])
+    expect(state.user?.id).toBe(newUser.info.id)
+    expect(state.assistant?.id).toBe(oldAssistant.info.id)
+  })
 })

@@ -27,6 +27,16 @@ type MessageApi = ServerApi["message"]
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const cmpMessage = (a: Message, b: Message) => a.time.created - b.time.created || cmp(a.id, b.id)
+// Generic sort for message-like collections: time-primary when both sides carry
+// a creation time (required because Message ids wrap every ~2.18 years — the
+// Identifier encodes a 48-bit window of timestamp<<12 — after which string id
+// order no longer matches chronological order), falling back to id for types
+// without a time (e.g. parts).
+const cmpMessageOrId = <T extends { id: string }>(a: T, b: T) => {
+  const at = (a as { time?: { created: number } }).time?.created
+  const bt = (b as { time?: { created: number } }).time?.created
+  return at !== undefined && bt !== undefined && at !== bt ? at - bt : cmp(a.id, b.id)
+}
 const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 const initialMessagePageSize = 20
 const historyMessagePageSize = 200
@@ -64,7 +74,7 @@ type MessagePage = {
 function legacyMessageSource(items: { info: Message; parts: Part[] }[]): SessionMessageInfo[] {
   return items
     .slice()
-    .sort((a, b) => cmp(a.info.id, b.info.id))
+    .sort((a, b) => cmpMessage(a.info, b.info))
     .map((item) => {
       if (item.info.role === "user") {
         return {
@@ -180,7 +190,7 @@ function reconcileFetched<T extends { id: string }>(
     if (!item) result.delete(id)
   }
   for (const id of options.removed ?? emptyIDs) result.delete(id)
-  return [...result.values()].sort((a, b) => cmp(a.id, b.id))
+  return [...result.values()].sort(cmpMessageOrId)
 }
 
 type ServerSessionOptions = { retry?: typeof retry; protocol?: Promise<"v1" | "v2"> }
@@ -555,7 +565,7 @@ export function createServerSession(
       const source = pages.flatMap((page) => page.data).toReversed()
       const normalized = normalizeSessionMessages(sessionID, source)
       return {
-        session: normalized.messages.sort((a, b) => cmp(a.id, b.id)),
+        session: normalized.messages.sort(cmpMessage),
         part: [...normalized.parts.entries()]
           .map(([id, part]) => ({ id, part: part.sort((a, b) => cmp(a.id, b.id)) }))
           .sort((a, b) => cmp(a.id, b.id)),
@@ -572,7 +582,7 @@ export function createServerSession(
     })
     const items = (response.data ?? []).filter((item) => !!item?.info?.id)
     return {
-      session: items.map((item) => cleanMessage(item.info)).sort((a, b) => cmp(a.id, b.id)),
+      session: items.map((item) => cleanMessage(item.info)).sort(cmpMessage),
       part: items.map((item) => ({
         id: item.info.id,
         part: item.parts.filter((part) => !!part?.id).sort((a, b) => cmp(a.id, b.id)),
@@ -696,7 +706,7 @@ export function createServerSession(
             const normalized = normalizeSessionMessages(sessionID, source)
             return {
               ...page,
-              session: normalized.messages.sort((a, b) => cmp(a.id, b.id)),
+              session: normalized.messages.sort(cmpMessage),
               part: [...normalized.parts.entries()]
                 .map(([id, part]) => ({ id, part: part.sort((a, b) => cmp(a.id, b.id)) }))
                 .sort((a, b) => cmp(a.id, b.id)),

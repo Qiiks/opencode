@@ -642,23 +642,31 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
 
 // filterCompacted reorders messages for model consumption
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array
-// position is not chronological. Derive each binding by max id (MessageID
-// is monotonic via MessageID.ascending) so a pre-compaction overflowing tail
-// assistant doesn't get mistaken for the most recent turn. tasks are
+// position is not chronological. Derive each binding by creation time so a
+// pre-compaction overflowing tail assistant doesn't get mistaken for the most
+// recent turn. Message ids are NOT a reliable primary order here: Identifier
+// encodes a 48-bit window of (timestamp_ms << 12 | counter) that wraps every
+// ~2.18 years (observed 2026-08-13→14: pre-wrap ids start "msg_f…", post-wrap
+// ids start "msg_000…", and "f" > "0" as strings), so comparing ids as strings
+// picks the WRONG message across the wrap. Compare by time, with id as the
+// tiebreak — two messages created in the same millisecond are necessarily on
+// the same side of the wrap, so their ids remain comparable. tasks are
 // compaction/subtask parts attached to user messages newer than the latest
 // finished assistant — i.e. unprocessed work.
 export function latest(msgs: WithParts[]) {
+  const isAfter = (a: { time: { created: number }; id: string }, b: { time: { created: number }; id: string }) =>
+    a.time.created > b.time.created || (a.time.created === b.time.created && a.id > b.id)
   let user: User | undefined
   let assistant: Assistant | undefined
   let finished: Assistant | undefined
   for (const msg of msgs) {
     const info = msg.info
-    if (info.role === "user" && (!user || info.id > user.id)) user = info
-    if (info.role === "assistant" && (!assistant || info.id > assistant.id)) assistant = info
-    if (info.role === "assistant" && info.finish && (!finished || info.id > finished.id)) finished = info
+    if (info.role === "user" && (!user || isAfter(info, user))) user = info
+    if (info.role === "assistant" && (!assistant || isAfter(info, assistant))) assistant = info
+    if (info.role === "assistant" && info.finish && (!finished || isAfter(info, finished))) finished = info
   }
   const tasks = msgs.flatMap((m) =>
-    finished && m.info.id <= finished.id
+    finished && !isAfter(m.info, finished)
       ? []
       : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
   )

@@ -635,4 +635,119 @@ describe("revert + compact workflow", () => {
       { git: true },
     ),
   )
+
+  // Regression: revert.cleanup previously compared message ids as STRINGS. After
+  // the Identifier wrap (2026-08-13→14) pre-wrap ids start "msg_f…" and post-wrap
+  // ids start "msg_000…" — "f" > "0" — so a staged revert on a post-wrap message
+  // wiped the ENTIRE pre-wrap history on every prompt. cleanup must remove only
+  // messages that come AFTER the boundary chronologically.
+  it.live(
+    "cleanup across the ID wrap keeps pre-wrap history, removes only post-boundary messages",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const info = yield* session.create({})
+          const sessionID = info.id
+          const model = { providerID: ProviderV2.ID.make("openai"), modelID: ModelV2.ID.make("gpt-4") }
+
+          const PRE = 1_782_000_000_000
+          const POST = 1_786_000_000_000
+          const oldUserID = MessageID.make("msg_f26f00000000000000000001")
+          const oldAssistantID = MessageID.make("msg_f26f00000000000000000002")
+          const boundaryID = MessageID.make("msg_000000000000000000000001")
+          const afterID = MessageID.make("msg_000000000000000000000002")
+
+          yield* session.updateMessage({
+            id: oldUserID,
+            role: "user",
+            sessionID,
+            agent: "default",
+            model,
+            time: { created: PRE },
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: oldUserID,
+            sessionID,
+            type: "text",
+            text: "old turn",
+          })
+          yield* session.updateMessage({
+            id: oldAssistantID,
+            role: "assistant",
+            sessionID,
+            mode: "default",
+            agent: "default",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: model.modelID,
+            providerID: model.providerID,
+            parentID: oldUserID,
+            time: { created: PRE + 1 },
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: oldAssistantID,
+            sessionID,
+            type: "text",
+            text: "old reply",
+          })
+          yield* session.updateMessage({
+            id: boundaryID,
+            role: "user",
+            sessionID,
+            agent: "default",
+            model,
+            time: { created: POST },
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: boundaryID,
+            sessionID,
+            type: "text",
+            text: "revert to here",
+          })
+          yield* session.updateMessage({
+            id: afterID,
+            role: "assistant",
+            sessionID,
+            mode: "default",
+            agent: "default",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: model.modelID,
+            providerID: model.providerID,
+            parentID: boundaryID,
+            time: { created: POST + 1 },
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: afterID,
+            sessionID,
+            type: "text",
+            text: "after reply",
+          })
+
+          yield* revert.revert({ sessionID, messageID: boundaryID })
+          const sessionInfo = yield* session.get(sessionID)
+          expect(sessionInfo.revert).toBeDefined()
+
+          yield* revert.cleanup(sessionInfo)
+
+          const remaining = (yield* session.messages({ sessionID })).map((m) => m.info.id)
+          expect(remaining).toContain(oldUserID)
+          expect(remaining).toContain(oldAssistantID)
+          expect(remaining).not.toContain(boundaryID)
+          expect(remaining).not.toContain(afterID)
+          expect((yield* session.get(sessionID)).revert).toBeUndefined()
+
+          yield* session.remove(sessionID)
+        }),
+      { git: true },
+    ),
+  )
 })

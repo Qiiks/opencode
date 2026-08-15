@@ -71,7 +71,8 @@ const layer = Layer.effect(
       if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
       yield* snap.revert(patches)
       if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
-      const range = all.filter((msg) => msg.info.id >= rev.messageID)
+      const boundaryIndex = all.findIndex((msg) => msg.info.id === rev.messageID)
+      const range = boundaryIndex < 0 ? [] : all.slice(boundaryIndex)
       const diffs = yield* summary.computeDiff({ messages: range })
       yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
       yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
@@ -102,19 +103,27 @@ const layer = Layer.effect(
       const sessionID = session.id
       const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
       const messageID = session.revert.messageID
+      // sessions.messages() returns messages oldest→newest (ordered by
+      // time_created). The boundary message's position defines the rollback
+      // point; everything from it onward (the boundary itself too, unless
+      // partID is set) is removed. Compare by position, not by id string:
+      // message ids are not orderable across the Identifier wrap (observed
+      // 2026-08-13→14: pre-wrap ids start "msg_f…", post-wrap ids start
+      // "msg_000…", "f" > "0" as strings), so a string comparison removes
+      // the WRONG set — including, for a post-wrap boundary, the entire
+      // pre-wrap history.
+      const boundaryIndex = msgs.findIndex((msg) => msg.info.id === messageID)
       const remove = [] as SessionV1.WithParts[]
       let target: SessionV1.WithParts | undefined
-      for (const msg of msgs) {
-        if (msg.info.id < messageID) continue
-        if (msg.info.id > messageID) {
+      if (boundaryIndex >= 0) {
+        for (let i = boundaryIndex; i < msgs.length; i++) {
+          const msg = msgs[i]
+          if (i === boundaryIndex && session.revert.partID) {
+            target = msg
+            continue
+          }
           remove.push(msg)
-          continue
         }
-        if (session.revert.partID) {
-          target = msg
-          continue
-        }
-        remove.push(msg)
       }
       for (const msg of remove) {
         yield* sessions.removeMessage({ sessionID, messageID: msg.info.id })
