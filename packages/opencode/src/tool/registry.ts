@@ -57,7 +57,13 @@ import { McpCatalog } from "@/mcp/catalog"
 import { Auth } from "@/auth"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false, synthetic: false }) {
-  return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel || flags.synthetic
+  return (
+    providerID === ProviderV2.ID.opencode ||
+    providerID === ProviderV2.ID.make("opencode-go") ||
+    flags.exa ||
+    flags.parallel ||
+    flags.synthetic
+  )
 }
 
 type TaskDef = Tool.InferDef<typeof TaskTool>

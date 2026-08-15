@@ -703,14 +703,9 @@ const layer: Layer.Layer<
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
-      // messages() is ordered oldest→newest by time_created; clone everything
-      // strictly before the fork boundary. Compare by position, not id string
-      // (ids wrap every ~2.18 years; a string comparison picks the wrong
-      // boundary across the wrap).
-      const boundaryIndex = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : -1
-      for (let i = 0; i < msgs.length; i++) {
-        if (boundaryIndex >= 0 && i >= boundaryIndex) break
-        const msg = msgs[i]
+      const target = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : msgs.length
+
+      for (const msg of msgs.slice(0, target < 0 ? msgs.length : target)) {
         const newID = MessageID.ascending()
         idMap.set(msg.info.id, newID)
 

@@ -398,107 +398,17 @@ describe("session.message-v2.toModelMessage", () => {
             toolCallId: "call-1",
             toolName: "bash",
             output: {
-              type: "text",
-              value: "ok",
+              type: "content",
+              value: [
+                { type: "text", text: "ok" },
+                { type: "media", mediaType: "image/png", data: "Zm9v" },
+              ],
             },
             providerOptions: { openai: { tool: "meta" } },
           },
         ],
       },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT },
-          {
-            type: "file",
-            data: "data:image/png;base64,Zm9v",
-            mediaType: "image/png",
-            filename: "attachment.png",
-          },
-        ],
-      },
     ])
-  })
-
-  test("extracts tool-result media for anthropic models without attachment capability", async () => {
-    const noAttachmentAnthropicModel: Provider.Model = {
-      ...model,
-      id: ModelV2.ID.make("synthetic/hf:zai-org/GLM-5.2"),
-      providerID: ProviderV2.ID.make("synthetic"),
-      api: {
-        id: "hf:zai-org/GLM-5.2",
-        url: "https://api.synthetic.new/anthropic/v1",
-        npm: "@ai-sdk/anthropic",
-      },
-      capabilities: {
-        ...model.capabilities,
-        attachment: false,
-      },
-    }
-
-    const userID = "m-user"
-    const assistantID = "m-assistant"
-
-    const input: SessionV1.WithParts[] = [
-      {
-        info: userInfo(userID),
-        parts: [
-          {
-            ...basePart(userID, "u1"),
-            type: "text",
-            text: "run tool",
-          },
-        ] as SessionV1.Part[],
-      },
-      {
-        info: assistantInfo(assistantID, userID),
-        parts: [
-          {
-            ...basePart(assistantID, "a1"),
-            type: "text",
-            text: "done",
-          },
-          {
-            ...basePart(assistantID, "a2"),
-            type: "tool",
-            callID: "call-1",
-            tool: "bash",
-            state: {
-              status: "completed",
-              input: { cmd: "ls" },
-              output: "ok",
-              title: "Bash",
-              metadata: {},
-              time: { start: 0, end: 1 },
-              attachments: [
-                {
-                  ...basePart(assistantID, "file-1"),
-                  type: "file",
-                  mime: "image/png",
-                  filename: "attachment.png",
-                  url: "data:image/png;base64,Zm9v",
-                },
-              ],
-            },
-          },
-        ] as SessionV1.Part[],
-      },
-    ]
-
-    const result = await MessageV2.toModelMessages(input, noAttachmentAnthropicModel)
-    // Media must be extracted out of the tool result and injected as a user
-    // message (so unsupportedParts() can degrade it gracefully), not kept in
-    // the tool result where the provider would reject the whole request.
-    const toolResult = result.find((m) => m.role === "tool")
-    expect(toolResult).toBeDefined()
-    const output = (toolResult!.content as any[])[0] as any
-    expect(output.output.type).toBe("text")
-    expect(JSON.stringify(output.output)).not.toContain("image/png")
-
-    const mediaMsg = result.find(
-      (m) => m.role === "user" && Array.isArray(m.content) && m.content.some((c: any) => c.type === "file"),
-    )
-    expect(mediaMsg).toBeDefined()
   })
 
   test("preserves jpeg tool-result media for anthropic models", async () => {
@@ -1701,6 +1611,44 @@ describe("session.message-v2.latest", () => {
     ] as SessionV1.Part[],
   }
 
+  test("selects latest messages by creation time when IDs are nonmonotonic", () => {
+    const oldUser = { ...userInfo("msg_z_user"), time: { created: 100 } }
+    const newUser = { ...userInfo("msg_a_user"), time: { created: 200 } }
+    const oldAssistant = {
+      ...assistantInfo("msg_z_assistant", oldUser.id),
+      time: { created: 300 },
+      finish: "stop",
+    } as SessionV1.Assistant
+    const newAssistant = {
+      ...assistantInfo("msg_a_assistant", newUser.id),
+      time: { created: 400 },
+      finish: "stop",
+    } as SessionV1.Assistant
+
+    const state = MessageV2.latest([
+      { info: newAssistant, parts: [] },
+      { info: oldUser, parts: [] },
+      { info: oldAssistant, parts: [] },
+      { info: newUser, parts: [] },
+    ])
+
+    expect(state.user?.id).toBe(newUser.id)
+    expect(state.assistant?.id).toBe(newAssistant.id)
+    expect(state.finished?.id).toBe(newAssistant.id)
+  })
+
+  test("uses ID as a deterministic tie-breaker for equal creation times", () => {
+    const lower = { ...userInfo("msg_a_user"), time: { created: 100 } }
+    const higher = { ...userInfo("msg_z_user"), time: { created: 100 } }
+
+    const state = MessageV2.latest([
+      { info: higher, parts: [] },
+      { info: lower, parts: [] },
+    ])
+
+    expect(state.user?.id).toBe(higher.id)
+  })
+
   // Regression for double auto-compaction. The reorder in filterCompacted
   // (#27145) returns [compaction-user, summary, ...tail..., continue-user],
   // so picking lastFinished by array position landed on the pre-compaction
@@ -1750,36 +1698,32 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
   })
 
-  // Regression: Identifier encodes (timestamp_ms << 12 | counter) in a 48-bit
-  // window that wraps every ~2.18 years. After the wrap (observed 2026-08-13→14)
-  // NEW ids start "msg_000…" and OLD ids start "msg_f…" — as strings "f" > "0",
-  // so max-by-id picks the WRONG (older) message across the wrap. latest() must
-  // order by creation time, with id only as a same-millisecond tiebreak.
-  test("latest() picks the chronologically-newest message across the ID wrap", () => {
-    const PRE_WRAP = 1_782_000_000_000
-    const POST_WRAP = 1_786_000_000_000
-    const oldUser = {
-      info: { ...userInfo(MessageID.make("msg_f26f00000000000000000001")), time: { created: PRE_WRAP } },
-      parts: [{ ...basePart("msg_f26f00000000000000000001", "p1"), type: "text", text: "old turn" }] as SessionV1.Part[],
+  test("selects compaction and subtask work after the finished boundary by creation time", () => {
+    const finished = {
+      ...assistantInfo("msg_z_finished", "msg_parent"),
+      time: { created: 200 },
+      finish: "stop",
+    } as SessionV1.Assistant
+    const oldTask: SessionV1.WithParts = {
+      info: { ...userInfo("msg_z_old"), time: { created: 100 } },
+      parts: [{ ...basePart("msg_z_old", "old"), type: "compaction", auto: true }] as SessionV1.Part[],
     }
-    const newUser = {
-      info: { ...userInfo(MessageID.make("msg_000000000000000000000001")), time: { created: POST_WRAP } },
-      parts: [{ ...basePart("msg_000000000000000000000001", "p1"), type: "text", text: "new turn" }] as SessionV1.Part[],
-    }
-    const oldAssistant = {
-      info: {
-        ...assistantInfo(MessageID.make("msg_f26f00000000000000000002"), MessageID.make("msg_f26f00000000000000000001")),
-        finish: "stop",
-        time: { created: PRE_WRAP + 1 },
-      } as SessionV1.Assistant,
-      parts: [],
+    const newTask: SessionV1.WithParts = {
+      info: { ...userInfo("msg_a_new"), time: { created: 300 } },
+      parts: [
+        {
+          ...basePart("msg_a_new", "new"),
+          type: "subtask",
+          prompt: "inspect",
+          description: "inspect ordering",
+          agent: "general",
+        },
+      ] as SessionV1.Part[],
     }
 
-    // Pre-wrap messages AFTER post-wrap messages in the array: id-based "max"
-    // would still pick the pre-wrap assistant as latest, time-based picks the
-    // post-wrap user as the last user and the pre-wrap assistant as finished.
-    const state = MessageV2.latest([oldUser, oldAssistant, newUser])
-    expect(state.user?.id).toBe(newUser.info.id)
-    expect(state.assistant?.id).toBe(oldAssistant.info.id)
+    const state = MessageV2.latest([newTask, { info: finished, parts: [] }, oldTask])
+
+    expect(state.tasks).toHaveLength(1)
+    expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
   })
 })

@@ -122,52 +122,6 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
   })
 }
 
-function messageRows(
-  db: Database.Interface["db"],
-  input: {
-    sessionID: SessionID
-    limit: number
-    before?: string
-  },
-) {
-  return Effect.gen(function* () {
-    const before = input.before ? cursor.decode(input.before) : undefined
-    const where = before
-      ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-      : eq(MessageTable.session_id, input.sessionID)
-    const rows = yield* db
-      .select()
-      .from(MessageTable)
-      .where(where)
-      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-      .limit(input.limit + 1)
-      .all()
-      .pipe(Effect.orDie)
-    if (rows.length === 0) {
-      const row = yield* db
-        .select({ id: SessionTable.id })
-        .from(SessionTable)
-        .where(eq(SessionTable.id, input.sessionID))
-        .get()
-        .pipe(Effect.orDie)
-      if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
-      return {
-        rows: [],
-        more: false,
-      }
-    }
-
-    const more = rows.length > input.limit
-    const slice = more ? rows.slice(0, input.limit) : rows
-    const tail = slice.at(-1)
-    return {
-      rows: slice,
-      more,
-      cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
-    }
-  })
-}
-
 function providerMeta(metadata: Record<string, any> | undefined) {
   if (!metadata) return undefined
   const { providerExecuted: _, ...rest } = metadata
@@ -191,11 +145,6 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   // Only apply this workaround if the model actually supports that media input -
   // otherwise unsupportedParts() will turn it into a user-visible error.
   const supportsMediaInToolResult = (attachment: { mime: string }) => {
-    // If the model has no attachment capability at all (e.g. GLM-5.2 on
-    // Synthetic via @ai-sdk/anthropic), don't keep media in tool results -
-    // route it to a user message so unsupportedParts() can degrade gracefully
-    // instead of the provider rejecting the whole request.
-    if (!model.capabilities.attachment) return false
     if (model.api.npm === "@ai-sdk/anthropic") return true
     if (model.api.npm === "@ai-sdk/openai") return true
     if (model.api.npm === "@ai-sdk/amazon-bedrock/mantle") return true
@@ -479,13 +428,41 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
 }) {
   const { db } = yield* Database.Service
-  const result = yield* messageRows(db, input)
-  const items = yield* hydrate(db, result.rows)
+  const before = input.before ? cursor.decode(input.before) : undefined
+  const where = before
+    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+    : eq(MessageTable.session_id, input.sessionID)
+  const rows = yield* db
+    .select()
+    .from(MessageTable)
+    .where(where)
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+    .limit(input.limit + 1)
+    .all()
+    .pipe(Effect.orDie)
+  if (rows.length === 0) {
+    const row = yield* db
+      .select({ id: SessionTable.id })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, input.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+    return {
+      items: [] as WithParts[],
+      more: false,
+    }
+  }
+
+  const more = rows.length > input.limit
+  const slice = more ? rows.slice(0, input.limit) : rows
+  const items = yield* hydrate(db, slice)
   items.reverse()
+  const tail = slice.at(-1)
   return {
     items,
-    more: result.more,
-    cursor: result.cursor,
+    more,
+    cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
   }
 })
 
@@ -595,75 +572,22 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  const { db } = yield* Database.Service
-  const size = 50
-  const rows = [] as (typeof MessageTable.$inferSelect)[]
-  const completed = new Set<string>()
-  let retain: MessageID | undefined
-  let before: string | undefined
-
-  pages: while (true) {
-    const next = yield* messageRows(db, { sessionID, limit: size, before }).pipe(
-      Effect.catchIf(
-        (error): error is NotFoundError => NotFoundError.isInstance(error),
-        () => Effect.succeed({ rows: [] as (typeof MessageTable.$inferSelect)[], more: false, cursor: undefined }),
-      ),
-    )
-    if (next.rows.length === 0) break
-    for (const row of next.rows) {
-      rows.push(row)
-      const message = info(row)
-      if (retain) {
-        if (message.id === retain) break pages
-        continue
-      }
-      if (message.role === "user" && completed.has(message.id)) {
-        const compaction = (yield* parts(message.id)).find((item): item is CompactionPart => item.type === "compaction")
-        if (!compaction) continue
-        if (!compaction.tail_start_id) break pages
-        retain = compaction.tail_start_id
-        if (message.id === retain) break pages
-        continue
-      }
-      if (message.role === "assistant" && message.summary && message.finish && !message.error) {
-        completed.add(message.parentID)
-      }
-    }
-    if (!next.more || !next.cursor) break
-    before = next.cursor
-  }
-
-  const result = [] as WithParts[]
-  for (let index = 0; index < rows.length; index += size) {
-    result.push(...(yield* hydrate(db, rows.slice(index, index + size))))
-  }
-  return filterCompacted(result)
+  return filterCompacted(yield* stream(sessionID))
 })
 
 // filterCompacted reorders messages for model consumption
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array
-// position is not chronological. Derive each binding by creation time so a
-// pre-compaction overflowing tail assistant doesn't get mistaken for the most
-// recent turn. Message ids are NOT a reliable primary order here: Identifier
-// encodes a 48-bit window of (timestamp_ms << 12 | counter) that wraps every
-// ~2.18 years (observed 2026-08-13→14: pre-wrap ids start "msg_f…", post-wrap
-// ids start "msg_000…", and "f" > "0" as strings), so comparing ids as strings
-// picks the WRONG message across the wrap. Compare by time, with id as the
-// tiebreak — two messages created in the same millisecond are necessarily on
-// the same side of the wrap, so their ids remain comparable. tasks are
-// compaction/subtask parts attached to user messages newer than the latest
-// finished assistant — i.e. unprocessed work.
+// position is not chronological. IDs are only a deterministic tie-breaker
+// because imported messages do not necessarily have monotonic IDs.
 export function latest(msgs: WithParts[]) {
-  const isAfter = (a: { time: { created: number }; id: string }, b: { time: { created: number }; id: string }) =>
-    a.time.created > b.time.created || (a.time.created === b.time.created && a.id > b.id)
   let user: User | undefined
   let assistant: Assistant | undefined
   let finished: Assistant | undefined
   for (const msg of msgs) {
     const info = msg.info
-    if (info.role === "user" && (!user || isAfter(info, user))) user = info
-    if (info.role === "assistant" && (!assistant || isAfter(info, assistant))) assistant = info
-    if (info.role === "assistant" && info.finish && (!finished || isAfter(info, finished))) finished = info
+    if (info.role === "user" && isAfter(info, user)) user = info
+    if (info.role === "assistant" && isAfter(info, assistant)) assistant = info
+    if (info.role === "assistant" && info.finish && isAfter(info, finished)) finished = info
   }
   const tasks = msgs.flatMap((m) =>
     finished && !isAfter(m.info, finished)
@@ -671,6 +595,12 @@ export function latest(msgs: WithParts[]) {
       : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
   )
   return { user, assistant, finished, tasks }
+}
+
+function isAfter(info: Info, other?: Info) {
+  if (!other) return true
+  if (info.time.created !== other.time.created) return info.time.created > other.time.created
+  return info.id > other.id
 }
 
 export function fromError(
