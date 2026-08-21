@@ -268,12 +268,12 @@ const lowerToolMessages = Effect.fn("OpenAIChat.lowerToolMessages")(function* (m
     if (!ProviderShared.supportsContent(part, ["tool-result"]))
       return yield* ProviderShared.unsupportedContent("OpenAI Chat", "tool", ["tool-result"])
     if (part.result.type !== "content") {
-      messages.push({ role: "tool", tool_call_id: part.id, content: ProviderShared.toolResultText(part) })
+      messages.push({ role: "tool", tool_call_id: part.id.slice(0, 64), content: ProviderShared.toolResultText(part) })
       continue
     }
     const content: ReadonlyArray<ToolContent> = part.result.value
     const text = content.filter((item) => item.type === "text").map((item) => item.text)
-    messages.push({ role: "tool", tool_call_id: part.id, content: text.join("\n") })
+    messages.push({ role: "tool", tool_call_id: part.id.slice(0, 64), content: text.join("\n") })
     const files = content.filter((item) => item.type === "file")
     images.push(
       ...(yield* Effect.forEach(files, (item) =>

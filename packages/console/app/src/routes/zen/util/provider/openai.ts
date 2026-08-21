@@ -108,7 +108,7 @@ export function fromOpenaiRequest(body: any): CommonRequest {
         const id = (m as any).call_id
         const out = (m as any).output
         const content = typeof out === "string" ? out : JSON.stringify(out)
-        msgs.push({ role: "tool", tool_call_id: id, content })
+        msgs.push({ role: "tool", tool_call_id: id?.slice(0, 64), content })
       }
       continue
     }
@@ -139,7 +139,7 @@ export function fromOpenaiRequest(body: any): CommonRequest {
             const id = (p as any).tool_call_id
             const content =
               typeof (p as any).content === "string" ? (p as any).content : JSON.stringify((p as any).content)
-            msgs.push({ role: "tool", tool_call_id: id, content })
+            msgs.push({ role: "tool", tool_call_id: id?.slice(0, 64), content })
           }
         }
         if (parts.length === 1 && parts[0].type === "text") msgs.push({ role: "user", content: parts[0].text })
@@ -160,7 +160,7 @@ export function fromOpenaiRequest(body: any): CommonRequest {
     if ((m as any).role === "tool") {
       msgs.push({
         role: "tool",
-        tool_call_id: (m as any).tool_call_id,
+        tool_call_id: (m as any).tool_call_id?.slice(0, 64)?.slice(0, 64),
         content: (m as any).content,
       })
       continue
@@ -261,7 +261,7 @@ export function toOpenaiRequest(body: CommonRequest) {
             const name = (tc as any).function.name
             const a = (tc as any).function.arguments
             const args = typeof a === "string" ? a : JSON.stringify(a)
-            input.push({ type: "function_call", call_id: (tc as any).id, name, arguments: args })
+            input.push({ type: "function_call", call_id: (tc as any).id?.slice(0, 64), name, arguments: args })
           }
         }
       }
@@ -270,7 +270,7 @@ export function toOpenaiRequest(body: CommonRequest) {
 
     if ((m as any).role === "tool") {
       const out = typeof (m as any).content === "string" ? (m as any).content : JSON.stringify((m as any).content)
-      input.push({ type: "function_call_output", call_id: (m as any).tool_call_id, output: out })
+      input.push({ type: "function_call_output", call_id: (m as any).tool_call_id?.slice(0, 64), output: out })
       continue
     }
   }
@@ -434,7 +434,7 @@ export function toOpenaiResponse(resp: CommonResponse) {
           id: (tc as any).id,
           type: "function_call",
           name: (tc as any).function.name,
-          call_id: (tc as any).id,
+          call_id: (tc as any).id?.slice(0, 64),
           arguments: (tc as any).function.arguments,
         })
       }

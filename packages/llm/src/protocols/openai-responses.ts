@@ -275,7 +275,7 @@ const lowerToolChoice = (toolChoice: NonNullable<LLMRequest["toolChoice"]>) =>
 
 const lowerToolCall = (part: ToolCallPart): OpenAIResponsesInputItem => ({
   type: "function_call",
-  call_id: part.id,
+  call_id: part.id.slice(0, 64),
   name: part.name,
   arguments: ProviderShared.encodeJson(part.input),
 })
@@ -437,7 +437,7 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
         return yield* ProviderShared.unsupportedContent("OpenAI Responses", "tool", ["tool-result"])
       input.push({
         type: "function_call_output",
-        call_id: part.id,
+        call_id: part.id.slice(0, 64),
         output: yield* lowerToolResultOutput(part),
       })
     }
