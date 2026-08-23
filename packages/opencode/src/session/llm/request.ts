@@ -54,8 +54,22 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
-  const system = input.system
+  // Fresh mutable copy so plugin mutations can't leak into the caller's array.
+  const system = [...input.system]
 
+  // Fire system transform before params/messages assembly so plugins inspect
+  // and mutate final system state (upstream parity: v1.18.18 request.ts).
+  const header = system[0]
+  yield* input.plugin.trigger(
+    "experimental.chat.system.transform",
+    { sessionID: input.sessionID, model: input.model },
+    { system },
+  )
+  if (system.length > 2 && system[0] === header) {
+    const rest = system.slice(1)
+    system.length = 0
+    system.push(header, rest.join("\n"))
+  }
   const variant =
     !input.small && input.model.variants && input.user.model.variant
       ? input.model.variants[input.user.model.variant]
